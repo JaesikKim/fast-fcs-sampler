@@ -21,6 +21,22 @@ def _text_fields(raw):
 
 
 class FCSFile:
+    """Read selected raw events and metadata from a local FCS file.
+
+    Parameters
+    ----------
+    path : str or pathlib.Path
+        File to parse. Keep it available and unchanged during subsequent reads.
+
+    Notes
+    -----
+    ``channels`` and ``stains`` contain $PnN and $PnS labels in DATA column
+    order. Missing labels are empty strings. ``meta`` holds parsed TEXT fields.
+    Construction reads metadata, not the full event array. See the README for
+    supported layouts and TEXT parser limitations. File and validation errors
+    propagate to the caller.
+    """
+
     def __init__(self, path):
         self.path = Path(path)
         with self.path.open("rb") as fh:
@@ -65,6 +81,11 @@ class FCSFile:
             raise ValueError("DATA segment shorter than $TOT")
 
     def read_slice(self, start, count):
+        """Copy ``count`` rows starting at zero-based ``start`` via mmap.
+
+        Returns a NumPy array of shape (count, n_channels). Raises IndexError
+        for negative bounds or a range extending beyond n_events.
+        """
         if start < 0 or count < 0 or start + count > self.n_events:
             raise IndexError("event slice out of bounds")
         full = np.memmap(self.path, dtype=self.dtype, mode="r", offset=self.data_start,
@@ -72,7 +93,11 @@ class FCSFile:
         return np.asarray(full[start:start + count]).copy()
 
     def read_slice_pread(self, start, count):
-        """Alternative contiguous explicit read backend."""
+        """Copy a slice using file seek/read, with the same bounds as read_slice.
+
+        Returns a NumPy array of shape (count, n_channels). Detected short reads
+        raise ValueError. This method does not use the OS pread syscall.
+        """
         if start < 0 or count < 0 or start + count > self.n_events:
             raise IndexError("event slice out of bounds")
         with self.path.open("rb") as fh:
@@ -83,7 +108,12 @@ class FCSFile:
         return np.frombuffer(data, dtype=self.dtype).reshape(count, self.n_channels).copy()
 
     def read_indices(self, indices):
-        """Copy selected events in caller order using a read-only memory map."""
+        """Copy zero-based integer indices via mmap, retaining order/duplicates.
+
+        Returns shape (len(indices), n_channels). Empty input is accepted.
+        Noninteger or non-1D input raises TypeError; out-of-range indices raise
+        IndexError. Column labels remain available as channels and stains.
+        """
         indices = self._validate_indices(indices)
         if not len(indices):
             return np.empty((0, self.n_channels), dtype=self.dtype)
@@ -92,7 +122,12 @@ class FCSFile:
         return np.asarray(full[indices]).copy()
 
     def read_indices_pread(self, indices):
-        """Alternative explicit seek/read backend for filesystems where mmap is slow."""
+        """Copy selected events via seek/read, retaining order and duplicates.
+
+        Accepts the same indices as read_indices and coalesces adjacent rows
+        into reads. Detected short reads raise ValueError. This method does not
+        use the OS pread syscall or automatically switch to another backend.
+        """
         indices = self._validate_indices(indices)
         out = np.empty((len(indices), self.n_channels), dtype=self.dtype)
         if not len(indices):
@@ -130,6 +165,14 @@ class FCSFile:
         return values
 
     def sample(self, count=1000, seed=None):
+        """Return (indices, values) sampled uniformly without replacement.
+
+        ``count`` is an integer in [0, n_events]; otherwise ValueError is raised
+        for out-of-range counts. ``seed`` is passed to numpy.random.default_rng.
+        The indices are not sorted. Values have shape (count, n_channels) and
+        are read via read_indices. Labels are accessed separately through
+        channels ($PnN) and stains ($PnS), in array column order.
+        """
         if count < 0 or count > self.n_events:
             raise ValueError("sample count out of bounds")
         indices = np.random.default_rng(seed).choice(self.n_events, size=count, replace=False)
